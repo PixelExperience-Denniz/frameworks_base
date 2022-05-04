@@ -29,6 +29,7 @@ import static com.android.systemui.theme.ThemeOverlayApplier.TIMESTAMP_FIELD;
 import android.annotation.Nullable;
 import android.app.WallpaperColors;
 import android.app.WallpaperManager;
+import com.android.systemui.statusbar.policy.ConfigurationController;
 import android.app.WallpaperManager.OnColorsChangedListener;
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -55,6 +56,7 @@ import android.util.TypedValue;
 import androidx.annotation.NonNull;
 
 import com.android.internal.graphics.ColorUtils;
+import com.android.systemui.Dependency;
 import com.android.systemui.Dumpable;
 import com.android.systemui.SystemUI;
 import com.android.systemui.broadcast.BroadcastDispatcher;
@@ -66,6 +68,7 @@ import com.android.systemui.flags.FeatureFlags;
 import com.android.systemui.keyguard.WakefulnessLifecycle;
 import com.android.systemui.monet.ColorScheme;
 import com.android.systemui.settings.UserTracker;
+import com.android.systemui.statusbar.policy.ConfigurationController.ConfigurationListener;
 import com.android.systemui.statusbar.policy.DeviceProvisionedController;
 import com.android.systemui.statusbar.policy.DeviceProvisionedController.DeviceProvisionedListener;
 import com.android.systemui.util.settings.SecureSettings;
@@ -398,6 +401,31 @@ public class ThemeOverlayController extends SystemUI implements Dumpable {
                     }
                 },
                 UserHandle.USER_ALL);
+        mSecureSettings.registerContentObserverForUser(
+                Settings.Secure.getUriFor(Settings.Secure.SYSTEM_BLACK_THEME),
+                false,
+                new ContentObserver(mBgHandler) {
+                    @Override
+                    public void onChange(boolean selfChange, Collection<Uri> collection, int flags,
+                            int userId) {
+                        if (DEBUG) Log.d(TAG, "Overlay changed for user: " + userId);
+                        if (mUserTracker.getUserId() != userId) {
+                            return;
+                        }
+                        if (!mDeviceProvisionedController.isUserSetup(userId)) {
+                            Log.i(TAG, "Theme application deferred when setting changed.");
+                            mDeferredThemeEvaluation = true;
+                            return;
+                        }
+                        if (mSkipSettingChange) {
+                            if (DEBUG) Log.d(TAG, "Skipping setting change");
+                            mSkipSettingChange = false;
+                            return;
+                        }
+                        reevaluateSystemTheme(true /* forceReload */);
+                    }
+                },
+                UserHandle.USER_ALL);
 
         mSystemSettings.registerContentObserverForUser(
                 Settings.System.getUriFor(Settings.System.STATUS_BAR_BATTERY_STYLE),
@@ -474,6 +502,7 @@ public class ThemeOverlayController extends SystemUI implements Dumpable {
                 }
             }
         });
+        Dependency.get(ConfigurationController.class).addCallback(mConfigurationListener);
     }
 
     private void reevaluateSystemTheme(boolean forceReload) {
@@ -654,8 +683,10 @@ public class ThemeOverlayController extends SystemUI implements Dumpable {
                             Collectors.joining(", ")));
         }
 
-        boolean isBlackTheme = mSecureSettings.getInt(SYSTEM_BLACK_THEME, 0) == 1;
-
+        boolean nightMode = (mContext.getResources().getConfiguration().uiMode
+                & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
+        boolean isBlackTheme = mSecureSettings.getInt(Settings.Secure.SYSTEM_BLACK_THEME, 0) == 1
+                                && nightMode;
         mThemeManager.setIsBlackTheme(isBlackTheme);
 
         if (mNeedsOverlayCreation) {
@@ -667,9 +698,15 @@ public class ThemeOverlayController extends SystemUI implements Dumpable {
             mThemeManager.applyCurrentUserOverlays(categoryToPackage, null, currentUser,
                     managedProfiles);
         }
-
         mThemeManager.applyBlackTheme(isBlackTheme);
     }
+
+    private final ConfigurationListener mConfigurationListener = new ConfigurationListener() {
+        @Override
+        public void onUiModeChanged() {
+            reevaluateSystemTheme(true /* forceReload */);
+        }
+    };
 
     @Override
     public void dump(@NonNull FileDescriptor fd, @NonNull PrintWriter pw, @NonNull String[] args) {
